@@ -124,17 +124,19 @@ impl LspStore {
                 lsp_store
                     .update(cx, |lsp_store, cx| {
                         let lsp_data = lsp_store.latest_lsp_data(&buffer, cx);
-                        let folding = lsp_data.folding_ranges.get_or_insert_default();
 
-                        if let Some(fetched_ranges) = fetched {
-                            if lsp_data.buffer_version == query_version {
-                                folding.ranges.extend(fetched_ranges);
-                            } else if !lsp_data.buffer_version.changed_since(&query_version) {
-                                lsp_data.buffer_version = query_version;
-                                folding.ranges = fetched_ranges;
-                            }
+                        if !update_folding_ranges_cache(
+                            &mut lsp_data.folding_ranges,
+                            &mut lsp_data.buffer_version,
+                            fetched,
+                            &query_version,
+                        ) {
+                            return Vec::new();
                         }
-                        folding.ranges_update = None;
+
+                        let Some(folding) = lsp_data.folding_ranges.as_mut() else {
+                            return Vec::new();
+                        };
                         let snapshot = buffer.read(cx).snapshot();
                         folding
                             .ranges
@@ -221,5 +223,51 @@ impl LspStore {
                 self.request_multiple_lsp_locally(buffer, None::<usize>, GetFoldingRanges, cx);
             cx.background_spawn(async move { Ok(Some(folding_task.await.into_iter().collect())) })
         }
+    }
+}
+
+fn update_folding_ranges_cache(
+    folding_ranges: &mut Option<FoldingRangeData>,
+    buffer_version: &mut Global,
+    fetched: Option<HashMap<LanguageServerId, Vec<LspFoldingRange>>>,
+    query_version: &Global,
+) -> bool {
+    let Some(fetched_ranges) = fetched else {
+        *folding_ranges = None;
+        return false;
+    };
+
+    let folding = folding_ranges.get_or_insert_default();
+    if *buffer_version == *query_version {
+        folding.ranges.extend(fetched_ranges);
+    } else if !buffer_version.changed_since(query_version) {
+        *buffer_version = query_version.clone();
+        folding.ranges = fetched_ranges;
+    }
+
+    folding.ranges_update = None;
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_folding_range_cache_is_cleared_when_no_server_is_available() {
+        let query_version = Global::new();
+        let mut buffer_version = query_version.clone();
+        let mut folding_ranges = Some(FoldingRangeData::default());
+
+        assert!(!update_folding_ranges_cache(
+            &mut folding_ranges,
+            &mut buffer_version,
+            None,
+            &query_version,
+        ));
+        assert!(
+            folding_ranges.is_none(),
+            "No-capable-server results should not be cached as empty folding ranges"
+        );
     }
 }
